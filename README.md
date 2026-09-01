@@ -4,7 +4,7 @@
 
 ## Скачать
 
-Готовый установщик Windows x64: [VipperFox 0.1.3](releases/VipperFox_0.1.3_x64-setup.exe).
+Готовый установщик Windows x64: [VipperFox 0.1.3](https://github.com/TwilightFoxy/vipperfox/releases/download/v0.1.3/VipperFox_0.1.3_x64-setup.exe).
 
 SHA-256: `E2A3BF984DCF9E135CEE61CFDCC2A0B866897AFF69BF747C85BD6B5EE475A395`
 
