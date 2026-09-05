@@ -6,6 +6,7 @@
   import Icon from "./lib/Icon.svelte";
   import { connectTwitch, disconnectTwitch, getSnapshot, onSnapshot, refreshVips, removeVips, setStreakThreshold } from "./lib/api";
   import { emptySnapshot, previewSnapshot } from "./lib/mock";
+  import { MAX_REMOVALS_PER_OPERATION, canAddSelection, channelConfirmationMatches, selectSafeBatch } from "./lib/removalSafety";
   import type { AppSnapshot, ReportUser } from "./lib/types";
 
   type View = "dashboard" | "vips" | "history" | "settings";
@@ -27,6 +28,8 @@
   let selected = new Set<string>();
   let removing = false;
   let confirmOpen = false;
+  let removalConfirmation = "";
+  let removalError = "";
   let settingsThreshold = 150;
   let settingsSaved = false;
   let previewMode = false;
@@ -38,6 +41,7 @@
   $: activeVips = snapshot.vips.filter((vip) => vip.wroteThisStream).length;
   $: silentVips = snapshot.stream ? snapshot.vips.filter((vip) => !vip.wroteThisStream).length : 0;
   $: selectedReport = snapshot.report.filter((item) => selected.has(item.userId));
+  $: confirmationMatches = channelConfirmationMatches(removalConfirmation, snapshot.channelLogin);
 
   onMount(async () => {
     previewMode = !Object.prototype.hasOwnProperty.call(window, "__TAURI_INTERNALS__") || new URLSearchParams(location.search).has("preview");
@@ -57,7 +61,13 @@
       settingsThreshold = snapshot.streakThreshold;
       await onSnapshot((next) => {
         snapshot = next;
-        selected = new Set([...selected].filter((id) => next.report.some((item) => item.userId === id)));
+        if (next.stream || !next.reportComplete) {
+          selected = new Set();
+          confirmOpen = false;
+          removalConfirmation = "";
+        } else {
+          selected = new Set([...selected].filter((id) => next.report.some((item) => item.userId === id)));
+        }
       });
     } catch (error) {
       connectError = String(error);
@@ -127,26 +137,37 @@
   }
 
   function toggleSelected(userId: string) {
+    if (!snapshot.reportComplete || removing) return;
     const next = new Set(selected);
+    if (!canAddSelection(next, userId)) {
+      removalError = `За одну безопасную операцию можно выбрать максимум ${MAX_REMOVALS_PER_OPERATION} пользователей.`;
+      return;
+    }
     next.has(userId) ? next.delete(userId) : next.add(userId);
     selected = next;
+    removalError = "";
   }
 
   function selectAllReport() {
-    selected = selected.size === snapshot.report.length
+    if (!snapshot.reportComplete || removing) return;
+    const batch = snapshot.report.slice(0, MAX_REMOVALS_PER_OPERATION);
+    selected = selected.size === batch.length
       ? new Set()
-      : new Set(snapshot.report.map((item) => item.userId));
+      : selectSafeBatch(snapshot.report);
+    removalError = snapshot.report.length > MAX_REMOVALS_PER_OPERATION ? `Выбраны первые ${MAX_REMOVALS_PER_OPERATION} пользователей. Остальных можно обработать следующим пакетом.` : "";
   }
 
   async function confirmRemoval() {
     if (!selected.size) return;
     removing = true;
-    confirmOpen = false;
+    removalError = "";
     try {
-      snapshot = await removeVips([...selected]);
+      snapshot = await removeVips([...selected], removalConfirmation);
       selected = new Set();
+      confirmOpen = false;
+      removalConfirmation = "";
     } catch (error) {
-      connectError = String(error);
+      removalError = String(error).replace(/^Error:\s*/, "");
     } finally {
       removing = false;
     }
@@ -287,7 +308,7 @@
       {/if}
 
       {#if snapshot.report.length}
-        <section class="report-drawer"><div class="report-head"><div><span class="section-kicker">СТРИМ ЗАВЕРШЁН</span><h2>{snapshot.report.length} VIP не писали в чат</h2><p>{snapshot.reportComplete ? "Проверьте список — снятие выполняется только вручную." : "Данные неполные: приложение подключилось поздно или теряло связь. Проверьте список особенно внимательно."}</p></div><button class="secondary-button" onclick={selectAllReport}>{selected.size === snapshot.report.length ? "Снять выделение" : "Выбрать всех"}</button></div><div class="report-list">{#each snapshot.report as user}<label class:selected={selected.has(user.userId)}><input type="checkbox" checked={selected.has(user.userId)} onchange={() => toggleSelected(user.userId)}/><span class="checkmark"><Icon name="check" size={14}/></span><span class="user-cell"><b>{user.displayName.slice(0,1).toUpperCase()}</b><span><strong>{user.displayName}</strong><small>@{user.login}</small></span></span><span class="status-chip">Не писал</span></label>{/each}</div><div class="report-actions"><span>Выбрано: <b>{selected.size}</b></span><button class="danger-button" disabled={!selected.size || removing} onclick={() => confirmOpen = true}><Icon name="trash" size={17}/>{removing ? "Снимаем…" : `Снять VIP у выбранных (${selected.size})`}</button></div></section>
+        <section class="report-drawer"><div class="report-head"><div><span class="section-kicker">СТРИМ ЗАВЕРШЁН</span><h2>{snapshot.report.length} VIP не писали в чат</h2><p>{snapshot.reportComplete ? "Проверьте список — снятие выполняется только вручную, пакетами до 20 человек." : "Данные неполные: снятие VIP заблокировано. Проверьте пользователей вручную в Twitch."}</p></div><button class="secondary-button" disabled={!snapshot.reportComplete || removing} onclick={selectAllReport}>{selected.size === Math.min(snapshot.report.length, 20) ? "Снять выделение" : "Выбрать до 20"}</button></div>{#if removalError}<div class="warning-banner"><div><Icon name="shield"/><span><strong>Операция не выполнена</strong><small>{removalError}</small></span></div></div>{/if}<div class="report-list">{#each snapshot.report as user}<label class:selected={selected.has(user.userId)} class:disabled={!snapshot.reportComplete}><input type="checkbox" disabled={!snapshot.reportComplete || removing} checked={selected.has(user.userId)} onchange={() => toggleSelected(user.userId)}/><span class="checkmark"><Icon name="check" size={14}/></span><span class="user-cell"><b>{user.displayName.slice(0,1).toUpperCase()}</b><span><strong>{user.displayName}</strong><small>@{user.login}</small></span></span><span class="status-chip">Не писал</span></label>{/each}</div><div class="report-actions"><span>Выбрано: <b>{selected.size}</b></span><button class="danger-button" disabled={!snapshot.reportComplete || !selected.size || removing} onclick={() => { removalConfirmation = ""; removalError = ""; confirmOpen = true; }}><Icon name="trash" size={17}/>{removing ? "Снимаем…" : `Снять VIP у выбранных (${selected.size})`}</button></div></section>
       {/if}
     </main>
   </div>
@@ -295,5 +316,5 @@
 
 {#if confirmOpen}
   <!-- svelte-ignore a11y_interactive_supports_focus a11y_click_events_have_key_events -->
-  <div class="modal-backdrop" role="presentation" onclick={() => confirmOpen = false}><section class="confirm-modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}><div class="modal-icon"><Icon name="trash" size={25}/></div><h2>Снять VIP у {selected.size} {selected.size === 1 ? "пользователя" : "пользователей"}?</h2><p>VipperFox отправит отдельные запросы с соблюдением лимита Twitch. Это действие отразится в истории.</p><div class="selected-names">{selectedReport.slice(0,3).map((u: ReportUser) => u.displayName).join(", ")}{selected.size > 3 ? ` и ещё ${selected.size - 3}` : ""}</div><div><button class="secondary-button" onclick={() => confirmOpen = false}>Отмена</button><button class="danger-button" onclick={confirmRemoval}>Да, снять VIP</button></div></section></div>
+  <div class="modal-backdrop" role="presentation" onclick={() => !removing && (confirmOpen = false)}><section class="confirm-modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}><div class="modal-icon"><Icon name="trash" size={25}/></div><h2>Снять VIP у {selected.size} {selected.size === 1 ? "пользователя" : "пользователей"}?</h2><p>Это изменит роли на Twitch. Для защиты введите логин подключённого канала: <strong>{snapshot.channelLogin}</strong></p><div class="selected-names">{selectedReport.slice(0,3).map((u: ReportUser) => u.displayName).join(", ")}{selected.size > 3 ? ` и ещё ${selected.size - 3}` : ""}</div><input class="danger-confirm-input" autocomplete="off" spellcheck="false" bind:value={removalConfirmation} placeholder={snapshot.channelLogin ?? "логин канала"}/>{#if removalError}<p class="modal-error">{removalError}</p>{/if}<div><button class="secondary-button" disabled={removing} onclick={() => confirmOpen = false}>Отмена</button><button class="danger-button" disabled={!confirmationMatches || removing} onclick={confirmRemoval}>{removing ? "Снимаем…" : "Да, снять VIP"}</button></div></section></div>
 {/if}

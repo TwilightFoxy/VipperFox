@@ -4,7 +4,7 @@ use crate::models::{
 };
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use serde_json::{json, Value};
-use std::{error::Error as StdError, time::Duration};
+use std::{collections::HashSet, error::Error as StdError, time::Duration};
 use tokio::time::sleep;
 
 const ID_BASE: &str = "https://id.twitch.tv/oauth2";
@@ -50,7 +50,10 @@ impl TwitchClient {
             .filter(|scope| !validation.scopes.iter().any(|value| value == scope))
             .collect();
         if !missing.is_empty() {
-            return Err(format!("В токене отсутствуют права: {}", missing.join(", ")));
+            return Err(format!(
+                "В токене отсутствуют права: {}",
+                missing.join(", ")
+            ));
         }
 
         let temporary = AuthSession {
@@ -137,9 +140,11 @@ impl TwitchClient {
     }
 
     pub async fn get_vips(&self, auth: &AuthSession) -> Result<Vec<VipUser>, String> {
+        const MAX_PAGES: usize = 100;
         let mut result = vec![];
         let mut cursor: Option<String> = None;
-        loop {
+        let mut seen_cursors = HashSet::new();
+        for _ in 0..MAX_PAGES {
             let mut query = vec![
                 ("broadcaster_id", auth.broadcaster_id.as_str()),
                 ("first", "100"),
@@ -157,12 +162,18 @@ impl TwitchClient {
                 watch_streak: None,
                 wrote_this_stream: false,
             }));
-            cursor = page.pagination.cursor;
-            if cursor.is_none() {
+            let Some(next_cursor) = page.pagination.cursor else {
                 result.sort_by_key(|vip| vip.login.to_lowercase());
                 return Ok(result);
+            };
+            if !seen_cursors.insert(next_cursor.clone()) {
+                return Err(
+                    "Twitch вернул повторяющийся курсор списка VIP; обновление отменено".into(),
+                );
             }
+            cursor = Some(next_cursor);
         }
+        Err("Twitch вернул слишком много страниц списка VIP; обновление отменено".into())
     }
 
     pub async fn live_stream(&self, auth: &AuthSession) -> Result<Option<HelixStream>, String> {
@@ -190,7 +201,9 @@ impl TwitchClient {
         match response.status() {
             StatusCode::NO_CONTENT => Ok(()),
             StatusCode::CONFLICT => Err("На канале нет свободных VIP-слотов".into()),
-            StatusCode::UNPROCESSABLE_ENTITY => Err("Пользователь уже VIP или является модератором".into()),
+            StatusCode::UNPROCESSABLE_ENTITY => {
+                Err("Пользователь уже VIP или является модератором".into())
+            }
             status => Err(format!("Twitch не выдал VIP (HTTP {})", status.as_u16())),
         }
     }
@@ -210,7 +223,7 @@ impl TwitchClient {
             .await
             .map_err(|error| error.to_string())?;
         match response.status() {
-            StatusCode::NO_CONTENT | StatusCode::UNPROCESSABLE_ENTITY => Ok(()),
+            StatusCode::NO_CONTENT => Ok(()),
             status => Err(format!("Twitch не снял VIP (HTTP {})", status.as_u16())),
         }
     }
@@ -244,7 +257,7 @@ impl TwitchClient {
             .send()
             .await
             .map_err(|error| error.to_string())?;
-        if response.status().is_success() || response.status() == StatusCode::CONFLICT {
+        if response.status().is_success() {
             Ok(())
         } else {
             let status = response.status();
@@ -254,7 +267,10 @@ impl TwitchClient {
                 .ok()
                 .and_then(|value| value.get("message")?.as_str().map(str::to_owned))
                 .unwrap_or_else(|| "Не удалось создать EventSub-подписку".into());
-            Err(format!("{event_type}: {message} (HTTP {})", status.as_u16()))
+            Err(format!(
+                "{event_type}: {message} (HTTP {})",
+                status.as_u16()
+            ))
         }
     }
 }

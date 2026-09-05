@@ -7,9 +7,10 @@ use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 use tauri::AppHandle;
 use tokio::time::{sleep, Duration};
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::{connect_async_with_config, tungstenite::protocol::WebSocketConfig};
 
 const EVENTSUB_URL: &str = "wss://eventsub.wss.twitch.tv/ws";
+const MAX_CHATTERS_PER_STREAM: usize = 100_000;
 
 enum ConnectionExit {
     Reconnect(String),
@@ -41,7 +42,9 @@ pub async fn run(app: AppHandle, state: AppState, generation: u64) {
                 delay = 1;
             }
             Ok(ConnectionExit::Closed) if state.generation_is(generation) => {
-                state.mark_connection_error("Соединение EventSub прервано".to_owned()).await;
+                state
+                    .mark_connection_error("Соединение EventSub прервано".to_owned())
+                    .await;
                 state.emit_snapshot(&app).await;
                 sleep(Duration::from_secs(delay)).await;
                 delay = (delay * 2).min(60);
@@ -70,29 +73,38 @@ async fn connection(
     processed: &mut HashSet<String>,
     processed_order: &mut VecDeque<String>,
 ) -> Result<ConnectionExit, String> {
-    if url.is_empty() {
-        return Err("empty reconnect URL".into());
-    }
+    validate_eventsub_url(url)?;
     let auth = state.auth().await.ok_or("Twitch не подключён")?;
-    let (socket, _) = connect_async(url)
-        .await
-        .map_err(|error| format!("EventSub WebSocket: {error}"))?;
+    let socket_config = WebSocketConfig::default()
+        .max_message_size(Some(1 << 20))
+        .max_frame_size(Some(1 << 20));
+    let (socket, _) = tokio::time::timeout(
+        Duration::from_secs(20),
+        connect_async_with_config(url, Some(socket_config), false),
+    )
+    .await
+    .map_err(|_| "Тайм-аут подключения EventSub".to_owned())?
+    .map_err(|error| format!("EventSub WebSocket: {error}"))?;
     // Keep the write half alive for the entire EventSub session. Dropping it here
     // would close the WebSocket before notifications can arrive.
     let (_outgoing, mut incoming) = socket.split();
-    let welcome = incoming
-        .next()
+    let welcome = tokio::time::timeout(Duration::from_secs(15), incoming.next())
         .await
+        .map_err(|_| "EventSub не прислал приветствие вовремя".to_owned())?
         .ok_or("EventSub закрыл соединение до приветствия")?
         .map_err(|error| error.to_string())?;
-    let welcome: Value = serde_json::from_str(
-        welcome.to_text().map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
+    let welcome: Value =
+        serde_json::from_str(welcome.to_text().map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
     let session_id = welcome
         .pointer("/payload/session/id")
         .and_then(Value::as_str)
         .ok_or("В EventSub welcome отсутствует session ID")?;
+    let keepalive_timeout = welcome
+        .pointer("/payload/session/keepalive_timeout_seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(10)
+        .clamp(5, 60);
 
     if !transferred {
         for (event_type, chat_event) in [
@@ -117,7 +129,17 @@ async fn connection(
     }
     state.emit_snapshot(app).await;
 
-    while let Some(message) = incoming.next().await {
+    loop {
+        let message =
+            tokio::time::timeout(Duration::from_secs(keepalive_timeout + 5), incoming.next())
+                .await
+                .map_err(|_| {
+                    "EventSub перестал присылать keepalive; соединение считается потерянным"
+                        .to_owned()
+                })?;
+        let Some(message) = message else {
+            break;
+        };
         if !state.generation_is(generation) {
             return Ok(ConnectionExit::Closed);
         }
@@ -159,7 +181,10 @@ async fn connection(
             .pointer("/payload/subscription/type")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let event = payload.pointer("/payload/event").cloned().unwrap_or(Value::Null);
+        let event = payload
+            .pointer("/payload/event")
+            .cloned()
+            .unwrap_or(Value::Null);
         handle_event(app, state, &auth, event_type, &event).await?;
     }
     Ok(ConnectionExit::Closed)
@@ -179,6 +204,11 @@ async fn reconcile(state: &AppState, auth: &crate::models::AuthSession) -> Resul
             Some(stream) if stream.id == live.id => {}
             _ => {
                 core.chatters.clear();
+                core.chatters_overflowed = false;
+                for vip in &mut core.snapshot.vips {
+                    vip.wrote_this_stream = false;
+                }
+                core.snapshot.report.clear();
                 core.snapshot.stream = Some(StreamInfo {
                     id: live.id,
                     started_at: live.started_at,
@@ -210,75 +240,170 @@ async fn handle_event(
     event_type: &str,
     event: &Value,
 ) -> Result<(), String> {
+    if event.get("broadcaster_user_id").and_then(Value::as_str)
+        != Some(auth.broadcaster_id.as_str())
+    {
+        // Never mutate local state or Twitch roles for an event belonging to a
+        // different channel, even if a malformed notification reaches us.
+        return Ok(());
+    }
     match event_type {
         "stream.online" => {
             let id = text(event, "id")?;
             let started_at = text(event, "started_at")?;
             let mut core = state.core.write().await;
-            core.chatters.clear();
+            if core
+                .snapshot
+                .stream
+                .as_ref()
+                .is_some_and(|stream| stream.id == id)
+            {
+                return Ok(());
+            }
             core.snapshot.report.clear();
-            core.snapshot.stream = Some(StreamInfo { id, started_at, complete: true });
+            core.snapshot.stream = Some(StreamInfo {
+                id,
+                started_at,
+                complete: !core.chatters_overflowed,
+            });
+            let active_ids = core.chatters.clone();
             for vip in &mut core.snapshot.vips {
-                vip.wrote_this_stream = false;
+                // EventSub types are separate subscriptions and their delivery
+                // order is not a correctness guarantee. Chat seen immediately
+                // before stream.online is therefore retained. Counting an
+                // offline message as activity is conservative; dropping a real
+                // first message could lead to removing the wrong VIP.
+                vip.wrote_this_stream = active_ids.contains(&vip.user_id);
             }
             drop(core);
-            state.push_activity(ActivityKind::System, "Стрим начался", "Мониторинг чата запущен без пропусков").await;
+            state
+                .push_activity(
+                    ActivityKind::System,
+                    "Стрим начался",
+                    "Мониторинг чата запущен без пропусков",
+                )
+                .await;
         }
         "stream.offline" => {
             let mut remote = state.twitch.get_vips(auth).await?;
             let mut core = state.core.write().await;
-            let complete = core.snapshot.stream.as_ref().map(|stream| stream.complete).unwrap_or(false);
+            let complete = core
+                .snapshot
+                .stream
+                .as_ref()
+                .map(|stream| stream.complete)
+                .unwrap_or(false);
             for vip in &mut remote {
                 vip.wrote_this_stream = core.chatters.contains(&vip.user_id);
-                if let Some(previous) = core.snapshot.vips.iter().find(|item| item.user_id == vip.user_id) {
+                if let Some(previous) = core
+                    .snapshot
+                    .vips
+                    .iter()
+                    .find(|item| item.user_id == vip.user_id)
+                {
                     vip.watch_streak = previous.watch_streak;
                 }
             }
-            core.snapshot.report = remote.iter().filter(|vip| !vip.wrote_this_stream).map(ReportUser::from).collect();
+            core.snapshot.report = remote
+                .iter()
+                .filter(|vip| !vip.wrote_this_stream)
+                .map(ReportUser::from)
+                .collect();
             core.snapshot.report_complete = complete;
             core.snapshot.vip_count = remote.len();
             core.snapshot.vips = remote;
             core.snapshot.stream = None;
             core.chatters.clear();
+            core.chatters_overflowed = false;
             drop(core);
-            state.push_activity(ActivityKind::System, "Стрим завершён", "Отчёт неактивных VIP готов").await;
+            state
+                .push_activity(
+                    ActivityKind::System,
+                    "Стрим завершён",
+                    "Отчёт неактивных VIP готов",
+                )
+                .await;
         }
         "channel.chat.message" => {
             let user_id = text(event, "chatter_user_id")?;
             let mut core = state.core.write().await;
+            if core.chatters.len() >= MAX_CHATTERS_PER_STREAM && !core.chatters.contains(&user_id) {
+                core.chatters_overflowed = true;
+                if let Some(stream) = core.snapshot.stream.as_mut() {
+                    stream.complete = false;
+                }
+                return Ok(());
+            }
             core.chatters.insert(user_id.clone());
-            if let Some(vip) = core.snapshot.vips.iter_mut().find(|vip| vip.user_id == user_id) {
+            if let Some(vip) = core
+                .snapshot
+                .vips
+                .iter_mut()
+                .find(|vip| vip.user_id == user_id)
+            {
                 vip.wrote_this_stream = true;
             }
         }
-        "channel.chat.notification" if event.get("notice_type").and_then(Value::as_str) == Some("watch_streak") => {
-            let count = event.pointer("/watch_streak/streak_count").and_then(Value::as_u64).unwrap_or(0);
+        "channel.chat.notification"
+            if event.get("notice_type").and_then(Value::as_str) == Some("watch_streak") =>
+        {
+            let count = event
+                .pointer("/watch_streak/streak_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let user_id = text(event, "chatter_user_id")?;
             let login = text(event, "chatter_user_login")?;
             let display_name = text(event, "chatter_user_name")?;
-            let (threshold, already_vip, wrote) = {
+            let (threshold, already_vip, wrote, stream_active) = {
                 let mut core = state.core.write().await;
                 let wrote = core.chatters.contains(&user_id);
                 let threshold = core.snapshot.streak_threshold;
-                let existing = core.snapshot.vips.iter_mut().find(|vip| vip.user_id == user_id);
+                let stream_active = core.snapshot.stream.is_some();
+                let existing = core
+                    .snapshot
+                    .vips
+                    .iter_mut()
+                    .find(|vip| vip.user_id == user_id);
                 if let Some(vip) = existing {
                     vip.watch_streak = Some(count);
-                    (threshold, true, wrote)
+                    (threshold, true, wrote, stream_active)
                 } else {
-                    (threshold, false, wrote)
+                    (threshold, false, wrote, stream_active)
                 }
             };
-            if count >= threshold && !already_vip {
+            if stream_active && count >= threshold && !already_vip {
                 match state.twitch.add_vip(auth, &user_id).await {
                     Ok(()) => {
                         let mut core = state.core.write().await;
-                        core.snapshot.vips.push(VipUser { user_id, login, display_name: display_name.clone(), watch_streak: Some(count), wrote_this_stream: wrote });
-                        core.snapshot.vips.sort_by_key(|vip| vip.login.to_lowercase());
+                        core.snapshot.vips.push(VipUser {
+                            user_id,
+                            login,
+                            display_name: display_name.clone(),
+                            watch_streak: Some(count),
+                            wrote_this_stream: wrote,
+                        });
+                        core.snapshot
+                            .vips
+                            .sort_by_key(|vip| vip.login.to_lowercase());
                         core.snapshot.vip_count = core.snapshot.vips.len();
                         drop(core);
-                        state.push_activity(ActivityKind::VipAdd, &format!("{display_name} получил VIP"), &format!("Watch Streak достиг {count}")).await;
+                        state
+                            .push_activity(
+                                ActivityKind::VipAdd,
+                                &format!("{display_name} получил VIP"),
+                                &format!("Watch Streak достиг {count}"),
+                            )
+                            .await;
                     }
-                    Err(error) => state.push_activity(ActivityKind::Warning, "Не удалось выдать VIP", &format!("{display_name}: {error}")).await,
+                    Err(error) => {
+                        state
+                            .push_activity(
+                                ActivityKind::Warning,
+                                "Не удалось выдать VIP",
+                                &format!("{display_name}: {error}"),
+                            )
+                            .await
+                    }
                 }
             }
         }
@@ -310,6 +435,14 @@ async fn handle_event(
     Ok(())
 }
 
+fn validate_eventsub_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "Некорректный EventSub URL".to_owned())?;
+    if parsed.scheme() != "wss" || parsed.host_str() != Some("eventsub.wss.twitch.tv") {
+        return Err("Небезопасный адрес переподключения EventSub отклонён".into());
+    }
+    Ok(())
+}
+
 fn text(value: &Value, key: &str) -> Result<String, String> {
     value
         .get(key)
@@ -325,11 +458,35 @@ mod tests {
     #[test]
     fn report_contains_only_silent_vips() {
         let vips = [
-            VipUser { user_id: "1".into(), login: "active".into(), display_name: "Active".into(), watch_streak: None, wrote_this_stream: true },
-            VipUser { user_id: "2".into(), login: "silent".into(), display_name: "Silent".into(), watch_streak: None, wrote_this_stream: false },
+            VipUser {
+                user_id: "1".into(),
+                login: "active".into(),
+                display_name: "Active".into(),
+                watch_streak: None,
+                wrote_this_stream: true,
+            },
+            VipUser {
+                user_id: "2".into(),
+                login: "silent".into(),
+                display_name: "Silent".into(),
+                watch_streak: None,
+                wrote_this_stream: false,
+            },
         ];
-        let report: Vec<ReportUser> = vips.iter().filter(|vip| !vip.wrote_this_stream).map(ReportUser::from).collect();
+        let report: Vec<ReportUser> = vips
+            .iter()
+            .filter(|vip| !vip.wrote_this_stream)
+            .map(ReportUser::from)
+            .collect();
         assert_eq!(report.len(), 1);
         assert_eq!(report[0].user_id, "2");
+    }
+
+    #[test]
+    fn eventsub_url_must_be_secure_and_owned_by_twitch() {
+        assert!(validate_eventsub_url(EVENTSUB_URL).is_ok());
+        assert!(validate_eventsub_url("ws://eventsub.wss.twitch.tv/ws").is_err());
+        assert!(validate_eventsub_url("wss://example.com/ws").is_err());
+        assert!(validate_eventsub_url("not a url").is_err());
     }
 }

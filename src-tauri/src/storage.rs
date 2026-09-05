@@ -15,6 +15,7 @@ impl Storage {
         connection
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
+                 PRAGMA busy_timeout=5000;
                  CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -28,7 +29,9 @@ impl Storage {
                  );",
             )
             .map_err(|error| error.to_string())?;
-        Ok(Self { connection: Mutex::new(connection) })
+        Ok(Self {
+            connection: Mutex::new(connection),
+        })
     }
 
     pub fn setting(&self, key: &str) -> Result<Option<String>, String> {
@@ -93,7 +96,12 @@ impl Storage {
         }
     }
 
-    pub fn add_activity(&self, kind: ActivityKind, title: &str, detail: &str) -> Result<ActivityEntry, String> {
+    pub fn add_activity(
+        &self,
+        kind: ActivityKind,
+        title: &str,
+        detail: &str,
+    ) -> Result<ActivityEntry, String> {
         let created_at = chrono::Utc::now().to_rfc3339();
         let kind_text = match kind {
             ActivityKind::VipAdd => "vip_add",
@@ -108,6 +116,14 @@ impl Storage {
                 params![kind_text, title, detail, created_at],
             )
             .map_err(|error| error.to_string())?;
+        // The visible history is intentionally bounded so a machine left running
+        // for years cannot grow the database without limit.
+        connection
+            .execute(
+                "DELETE FROM activities WHERE id NOT IN (SELECT id FROM activities ORDER BY id DESC LIMIT 2000)",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
         Ok(ActivityEntry {
             id: connection.last_insert_rowid(),
             kind,
@@ -120,7 +136,9 @@ impl Storage {
     pub fn activities(&self, limit: usize) -> Result<Vec<ActivityEntry>, String> {
         let connection = self.connection.lock().map_err(|_| "Database lock failed")?;
         let mut statement = connection
-            .prepare("SELECT id,kind,title,detail,created_at FROM activities ORDER BY id DESC LIMIT ?1")
+            .prepare(
+                "SELECT id,kind,title,detail,created_at FROM activities ORDER BY id DESC LIMIT ?1",
+            )
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([limit as i64], |row| {
@@ -139,7 +157,8 @@ impl Storage {
                 })
             })
             .map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -152,8 +171,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("test.db")).unwrap();
         storage.set_setting("threshold", "150").unwrap();
-        assert_eq!(storage.setting("threshold").unwrap().as_deref(), Some("150"));
-        storage.add_activity(ActivityKind::System, "Ready", "Connected").unwrap();
+        assert_eq!(
+            storage.setting("threshold").unwrap().as_deref(),
+            Some("150")
+        );
+        storage
+            .add_activity(ActivityKind::System, "Ready", "Connected")
+            .unwrap();
         assert_eq!(storage.activities(10).unwrap()[0].title, "Ready");
     }
 }

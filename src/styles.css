@@ -251,6 +251,10 @@ nav button b{margin-left:auto;background:#2c233c;color:#b990ff;border-radius:99p
 .confirm-modal h2{font-size:calc(16px * var(--font-scale))}
 .confirm-modal>p{font-size:calc(9px * var(--font-scale));line-height:1.6;margin-top:8px}
 .selected-names{background:#100c16;border-radius:8px;padding:8px;margin:15px 0;color:#afa5ba;font-size:calc(8px * var(--font-scale))}
+.danger-confirm-input{width:100%;box-sizing:border-box;margin:0 0 12px;padding:11px 12px;border:1px solid rgba(255,109,131,.38);border-radius:9px;background:#100c16;color:#f2edf7;outline:none;font:inherit}
+.danger-confirm-input:focus{border-color:#ff6d83;box-shadow:0 0 0 3px rgba(255,109,131,.1)}
+.modal-error{margin:0 0 12px!important;color:#ff91a2!important}
+.report-list label.disabled{opacity:.55;cursor:not-allowed}
 .confirm-modal>div:last-child{display:flex;justify-content:center;gap:8px}
 
 

@@ -113,6 +113,14 @@ pub struct ConnectRequest {
     pub access_token: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveVipsRequest {
+    pub user_ids: Vec<String>,
+    /// Deliberately typed by the operator in the confirmation dialog.
+    pub channel_confirmation: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthSession {
     pub client_id: String,

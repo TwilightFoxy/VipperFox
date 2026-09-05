@@ -14,8 +14,8 @@ export async function disconnectTwitch(): Promise<AppSnapshot> {
   return invoke<AppSnapshot>("disconnect_twitch");
 }
 
-export async function removeVips(userIds: string[]): Promise<AppSnapshot> {
-  return invoke<AppSnapshot>("remove_vips", { userIds });
+export async function removeVips(userIds: string[], channelConfirmation: string): Promise<AppSnapshot> {
+  return invoke<AppSnapshot>("remove_vips", { request: { userIds, channelConfirmation } });
 }
 
 export async function setStreakThreshold(value: number): Promise<AppSnapshot> {
