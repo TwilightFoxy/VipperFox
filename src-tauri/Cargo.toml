@@ -1,6 +1,6 @@
 [package]
 name = "vipperfox"
-version = "0.1.5"
+version = "0.2.0"
 description = "Local Twitch VIP companion"
 authors = ["VipperFox"]
 edition = "2021"

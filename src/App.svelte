@@ -4,7 +4,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import Icon from "./lib/Icon.svelte";
-  import { connectTwitch, disconnectTwitch, getSnapshot, onSnapshot, refreshVips, removeVips, setStreakThreshold } from "./lib/api";
+  import { connectTwitch, disconnectTwitch, getSnapshot, onSnapshot, refreshVips, removeVips, setLastMessage, setStreakThreshold } from "./lib/api";
   import { emptySnapshot, previewSnapshot } from "./lib/mock";
   import { MAX_REMOVALS_PER_OPERATION, canAddSelection, channelConfirmationMatches, selectSafeBatch } from "./lib/removalSafety";
   import type { AppSnapshot, ReportUser } from "./lib/types";
@@ -18,7 +18,7 @@
     localStorage.setItem("vipperfox-theme", value);
   }
 
-  type View = "dashboard" | "vips" | "history" | "settings";
+  type View = "dashboard" | "vips" | "report" | "history" | "settings";
   type InterfaceSize = "compact" | "standard" | "large";
   type FontSize = "normal" | "large" | "xlarge";
 
@@ -44,12 +44,50 @@
   let previewMode = false;
   let interfaceSize: InterfaceSize = "standard";
   let fontSize: FontSize = "large";
+  let dateEditor: {id: string; name: string; channel: string} | null = null;
+  let editedDate = "";
+  let dateError = "";
+  let savingDate = false;
+  function editDate(id: string, name: string) {
+    const previous = snapshot.lastMessages?.[id];
+    const date = previous ? new Date(previous) : new Date();
+    editedDate = new Date(date.getTime() - date.getTimezoneOffset()*60000).toISOString().slice(0,16);
+    dateEditor = { id, name, channel: snapshot.channelLogin ?? "" }; dateError = "";
+  }
+  async function saveDate() {
+    if (!dateEditor || savingDate) return;
+    savingDate = true; dateError = "";
+    try {
+      const date = new Date(editedDate);
+      if (!Number.isFinite(date.getTime()) || date > new Date()) throw new Error("Укажите корректную дату в прошлом");
+      if (previewMode) snapshot = {...snapshot,lastMessages:{...snapshot.lastMessages,[dateEditor.id]:date.toISOString()}};
+      else snapshot = await setLastMessage(dateEditor.id,date.toISOString(),dateEditor.channel);
+      dateEditor = null;
+    } catch (error) { dateError = String(error); } finally { savingDate = false; }
+  }
+  let search = "";
+  let sortBy = "name";
+  let sortDescending = false;
+  let manualRemoval = false;
+  let pendingIds: string[] = [];
+  $: visibleVips = snapshot.vips.filter(v => (v.login + " " + v.displayName).toLowerCase().includes(search.trim().toLowerCase())).slice().sort((a,b) => {
+    const comparison = sortBy === "name" ? a.login.localeCompare(b.login) : sortBy === "streak" ? (a.watchStreak ?? -1) - (b.watchStreak ?? -1) : (snapshot.lastMessages?.[a.userId] ?? "").localeCompare(snapshot.lastMessages?.[b.userId] ?? "");
+    return sortDescending ? -comparison : comparison;
+  });
+  function messageDate(id: string) {
+    const value = snapshot.lastMessages?.[id];
+    return value ? new Intl.DateTimeFormat("ru", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}).format(new Date(value)) : "Нет данных";
+  }
+  function openManualRemoval(id: string) {
+    if (removing) return;
+    manualRemoval = true; pendingIds = [id]; removalConfirmation = ""; removalError = ""; confirmOpen = true;
+  }
   let refreshingVips = false;
   let refreshError = "";
 
   $: activeVips = snapshot.vips.filter((vip) => vip.wroteThisStream).length;
   $: silentVips = snapshot.stream ? snapshot.vips.filter((vip) => !vip.wroteThisStream).length : 0;
-  $: selectedReport = snapshot.report.filter((item) => selected.has(item.userId));
+  $: selectedReport = manualRemoval ? snapshot.vips.filter(item => pendingIds.includes(item.userId)) : snapshot.report.filter((item) => selected.has(item.userId));
   $: confirmationMatches = channelConfirmationMatches(removalConfirmation, snapshot.channelLogin);
 
   onMount(async () => {
@@ -70,7 +108,7 @@
       settingsThreshold = snapshot.streakThreshold;
       await onSnapshot((next) => {
         snapshot = next;
-        if (next.stream || !next.reportComplete) {
+        if (!manualRemoval && (next.stream || !next.reportComplete)) {
           selected = new Set();
           confirmOpen = false;
           removalConfirmation = "";
@@ -167,11 +205,12 @@
   }
 
   async function confirmRemoval() {
-    if (!selected.size) return;
+    const ids = manualRemoval ? pendingIds : [...selected];
+    if (!ids.length || removing) return;
     removing = true;
     removalError = "";
     try {
-      snapshot = await removeVips([...selected], removalConfirmation);
+      snapshot = await removeVips(ids, removalConfirmation, manualRemoval);
       selected = new Set();
       confirmOpen = false;
       removalConfirmation = "";
@@ -272,6 +311,7 @@
       <nav>
         <button class:active={view === "dashboard"} onclick={() => view = "dashboard"}><Icon name="home"/><span>Обзор</span></button>
         <button class:active={view === "vips"} onclick={() => view = "vips"}><Icon name="users"/><span>VIP-зрители</span><b>{snapshot.vipCount}</b></button>
+        <button class:active={view === "report"} onclick={() => view = "report"}><Icon name="shield"/><span>Стрим завершён</span><b>{snapshot.report.length}</b></button>
         <button class:active={view === "history"} onclick={() => view = "history"}><Icon name="history"/><span>История</span></button>
         <button class:active={view === "settings"} onclick={() => view = "settings"}><Icon name="settings"/><span>Настройки</span></button>
       </nav>
@@ -284,7 +324,7 @@
       {#if view === "dashboard"}
         <header class="page-header"><div><span class="section-kicker">ДОБРЫЙ ВЕЧЕР</span><h1>Всё под контролем <span>✦</span></h1><p>VipperFox наблюдает за каналом и сохраняет только нужные события.</p></div><div class="header-actions"><button class="icon-button"><Icon name="history"/></button><div class="live-badge" class:offline={!snapshot.stream}><i></i>{snapshot.stream ? "LIVE" : "OFFLINE"}</div></div></header>
 
-        {#if snapshot.stream && !snapshot.stream.complete}<div class="warning-banner"><div><Icon name="shield"/><span><strong>Мониторинг трансляции неполный</strong><small>Программа подключилась после начала стрима или теряла соединение. Массовое снятие будет требовать дополнительного подтверждения.</small></span></div></div>{/if}
+        {#if snapshot.stream && !snapshot.stream.complete}<div class="warning-banner"><div><Icon name="shield"/><span><strong>Мониторинг трансляции неполный</strong><small>Программа подключилась после начала стрима или теряла соединение. Снятие из отчёта заблокировано.</small></span></div></div>{/if}
 
         <section class="stat-grid">
           <article class="stat-card violet"><div class="stat-icon"><Icon name="users"/></div><div><span>Всего VIP</span><strong>{snapshot.vipCount}</strong><small>Актуальный список Twitch</small></div><div class="mini-orbit"></div></article>
@@ -308,7 +348,16 @@
       {:else if view === "vips"}
         <header class="page-header"><div><span class="section-kicker">УПРАВЛЕНИЕ</span><h1>VIP-зрители</h1><p>Список доступен и обновляется даже когда канал офлайн.</p></div><div class="header-actions"><button class="secondary-button" disabled={refreshingVips} onclick={reloadVips}>{refreshingVips ? "Обновляем…" : "Обновить список"}</button><div class="live-badge" class:offline={!snapshot.stream}><i></i>{snapshot.stream ? "МОНИТОРИНГ" : "ОЖИДАНИЕ"}</div></div></header>
         {#if refreshError}<div class="warning-banner"><div><Icon name="shield"/><span><strong>Не удалось обновить VIP</strong><small>{refreshError}</small></span></div></div>{/if}
-        <section class="panel table-panel"><div class="panel-head"><div><h2>Текущий список</h2><span class="table-summary">{snapshot.stream ? `${activeVips} активны · ${silentVips} молчат` : "Канал офлайн · список доступен"}</span></div><div class="search-mock">⌕ <span>Поиск зрителя</span></div></div><div class="vip-table"><div class="table-row table-header"><span>Пользователь</span><span>Watch Streak</span><span>Писал сегодня</span><span>Статус</span></div>{#each snapshot.vips as vip, index}<div class="table-row" style={`--delay:${index * 40}ms`}><span class="user-cell"><b>{vip.displayName.slice(0,1).toUpperCase()}</b><span><strong>{vip.displayName}</strong><small>@{vip.login}</small></span></span><span>{vip.watchStreak ?? "—"}{#if vip.watchStreak && vip.watchStreak >= snapshot.streakThreshold}<em class="streak-star">✦</em>{/if}</span><span><span class:yes={vip.wroteThisStream} class="status-chip">{vip.wroteThisStream ? "✓ Писал" : "— Не отмечен"}</span></span><span><span class="vip-badge">VIP</span></span></div>{/each}</div></section>
+        {#if removalError && !confirmOpen}<div class="warning-banner">{removalError}</div>{/if}
+        <section class="panel table-panel">
+          <div class="vip-controls"><input class="vip-search" bind:value={search} placeholder="Поиск по нику…" aria-label="Поиск по нику"/><select bind:value={sortBy} aria-label="Сортировка"><option value="name">По имени</option><option value="streak">По Watch Streak</option><option value="last">По последнему сообщению</option></select><button class="secondary-button" onclick={() => sortDescending = !sortDescending}>{sortDescending ? "↓ По убыванию" : "↑ По возрастанию"}</button></div>
+          <p class="activity-note">Последнее замеченное сообщение сохраняется на этом компьютере. «Нет данных» не означает, что человек никогда не писал.</p>
+          <div class="vip-table management-table"><div class="table-row table-header"><span>Пользователь</span><span>Watch Streak</span><span>Писал сегодня</span><span>Последнее сообщение</span><span>Действие</span></div>
+          {#each visibleVips as vip}<div class="table-row"><span class="user-cell"><b>{vip.displayName.slice(0,1).toUpperCase()}</b><span><strong>{vip.displayName}</strong><small>@{vip.login}</small></span></span><span>{vip.watchStreak ?? "—"}</span><span><span class:yes={vip.wroteThisStream} class="status-chip">{vip.wroteThisStream ? "✓ Писал" : "—"}</span></span><span class="last-message">{messageDate(vip.userId)}<button class="text-button" onclick={() => editDate(vip.userId, vip.displayName)}>Изменить</button></span><button class="secondary-button danger" disabled={removing} onclick={() => openManualRemoval(vip.userId)}>Анвип</button></div>{:else}<div class="empty-small">Зрители не найдены</div>{/each}</div>
+        </section>
+      {:else if view === "report"}
+        <header class="page-header"><div><span class="section-kicker">ОТЧЁТ</span><h1>Стрим завершён</h1><p>VIP, у которых не замечено сообщений за завершённую трансляцию.</p></div></header>
+        {#if !snapshot.report.length}<section class="panel empty-large"><h3>Список пока пуст</h3><p>После завершения трансляции здесь появится отчёт. Если все VIP писали, список останется пустым.</p></section>{/if}
       {:else if view === "history"}
         <header class="page-header"><div><span class="section-kicker">ЖУРНАЛ</span><h1>История действий</h1><p>Выдача VIP, ручные снятия и состояние мониторинга.</p></div></header>
         <section class="panel history-panel">{#each snapshot.activities as activity}<div class="history-row"><div class:remove={activity.kind === "vip_remove"} class:warning={activity.kind === "warning"} class="activity-icon"><Icon name={activity.kind === "vip_add" ? "sparkles" : activity.kind === "vip_remove" ? "trash" : "shield"}/></div><div><strong>{activity.title}</strong><p>{activity.detail}</p></div><time>{new Intl.DateTimeFormat("ru", {day:"2-digit",month:"long",hour:"2-digit",minute:"2-digit"}).format(new Date(activity.createdAt))}</time></div>{:else}<div class="empty-large"><Icon name="history" size={34}/><h3>История пока пуста</h3><p>Первое событие появится после подключения Twitch.</p></div>{/each}</section>
@@ -317,8 +366,8 @@
         <section class="panel theme-card"><div><span class="section-kicker">ОФОРМЛЕНИЕ</span><h2>Выбери свой стиль</h2><p>Последняя выбранная тема сохраняется после перезапуска.</p></div><div class="theme-options"><button class:chosen={theme === "fox"} onclick={() => chooseTheme("fox")}><img src="/fox.png" alt=""/><span><strong>VipperFox</strong><small>Фиолетовый лис</small></span></button><button class:chosen={theme === "animecul"} onclick={() => chooseTheme("animecul")}><img src="/animecul.png" alt=""/><span><strong>Анимекул эдишин</strong><small>Лайм · кристалл · сияние</small></span></button></div></section><section class="settings-grid"><article class="panel settings-card appearance-card"><div class="settings-icon"><Icon name="eye"/></div><div><h2>Размер и читаемость</h2><p>Настройки применяются сразу и сохраняются на этом компьютере.</p><div class="preset-setting"><span>Интерфейс</span><div class="preset-buttons"><button class:active={interfaceSize === "compact"} onclick={() => chooseInterfaceSize("compact")}>90%</button><button class:active={interfaceSize === "standard"} onclick={() => chooseInterfaceSize("standard")}>110%</button><button class:active={interfaceSize === "large"} onclick={() => chooseInterfaceSize("large")}>130%</button></div></div><div class="preset-setting"><span>Шрифт</span><div class="preset-buttons"><button class:active={fontSize === "normal"} onclick={() => chooseFontSize("normal")}>Обычный</button><button class:active={fontSize === "large"} onclick={() => chooseFontSize("large")}>Крупный</button><button class:active={fontSize === "xlarge"} onclick={() => chooseFontSize("xlarge")}>Очень крупный</button></div></div></div></article><article class="panel settings-card"><div class="settings-icon"><Icon name="sparkles"/></div><div><h2>Автоматическая выдача VIP</h2><p>VipperFox выдаёт VIP при официальном Watch Streak notification.</p><label class="number-setting"><span>Минимальная серия</span><div><input type="number" min="1" bind:value={settingsThreshold}/><b>стримов</b></div></label><button class="primary-button compact" onclick={saveSettings}>{settingsSaved ? "Сохранено ✓" : "Сохранить"}</button></div></article><article class="panel settings-card danger-zone"><div class="settings-icon"><Icon name="shield"/></div><div><h2>Подключённый канал</h2><p><strong>{snapshot.channelDisplayName}</strong> · @{snapshot.channelLogin}</p><button class="secondary-button danger" onclick={async () => snapshot = await disconnectTwitch()}>Отключить Twitch</button></div></article></section>
       {/if}
 
-      {#if snapshot.report.length}
-        <section class="report-drawer"><div class="report-head"><div><span class="section-kicker">СТРИМ ЗАВЕРШЁН</span><h2>{snapshot.report.length} VIP не писали в чат</h2><p>{snapshot.reportComplete ? "Проверьте список — снятие выполняется только вручную, пакетами до 20 человек." : "Данные неполные: снятие VIP заблокировано. Проверьте пользователей вручную в Twitch."}</p></div><button class="secondary-button" disabled={!snapshot.reportComplete || removing} onclick={selectAllReport}>{selected.size === Math.min(snapshot.report.length, 20) ? "Снять выделение" : "Выбрать до 20"}</button></div>{#if removalError}<div class="warning-banner"><div><Icon name="shield"/><span><strong>Операция не выполнена</strong><small>{removalError}</small></span></div></div>{/if}<div class="report-list">{#each snapshot.report as user}<label class:selected={selected.has(user.userId)} class:disabled={!snapshot.reportComplete}><input type="checkbox" disabled={!snapshot.reportComplete || removing} checked={selected.has(user.userId)} onchange={() => toggleSelected(user.userId)}/><span class="checkmark"><Icon name="check" size={14}/></span><span class="user-cell"><b>{user.displayName.slice(0,1).toUpperCase()}</b><span><strong>{user.displayName}</strong><small>@{user.login}</small></span></span><span class="status-chip">Не писал</span></label>{/each}</div><div class="report-actions"><span>Выбрано: <b>{selected.size}</b></span><button class="danger-button" disabled={!snapshot.reportComplete || !selected.size || removing} onclick={() => { removalConfirmation = ""; removalError = ""; confirmOpen = true; }}><Icon name="trash" size={17}/>{removing ? "Снимаем…" : `Снять VIP у выбранных (${selected.size})`}</button></div></section>
+      {#if view === "report" && snapshot.report.length}
+        <section class="report-drawer"><div class="report-head"><div><span class="section-kicker">СТРИМ ЗАВЕРШЁН</span><h2>{snapshot.report.length} VIP не писали в чат</h2><p>{snapshot.reportComplete ? "Проверьте список — снятие выполняется только вручную, пакетами до 20 человек." : "Данные неполные: снятие VIP заблокировано. Проверьте пользователей вручную в Twitch."}</p></div><button class="secondary-button" disabled={!snapshot.reportComplete || removing} onclick={selectAllReport}>{selected.size === Math.min(snapshot.report.length, 20) ? "Снять выделение" : "Выбрать до 20"}</button></div>{#if removalError}<div class="warning-banner"><div><Icon name="shield"/><span><strong>Операция не выполнена</strong><small>{removalError}</small></span></div></div>{/if}<div class="report-list">{#each snapshot.report as user}<label class:selected={selected.has(user.userId)} class:disabled={!snapshot.reportComplete}><input type="checkbox" disabled={!snapshot.reportComplete || removing} checked={selected.has(user.userId)} onchange={() => toggleSelected(user.userId)}/><span class="checkmark"><Icon name="check" size={14}/></span><span class="user-cell"><b>{user.displayName.slice(0,1).toUpperCase()}</b><span><strong>{user.displayName}</strong><small>@{user.login}</small></span></span><span class="status-chip">Не писал · {messageDate(user.userId)}</span></label>{/each}</div><div class="report-actions"><span>Выбрано: <b>{selected.size}</b></span><button class="danger-button" disabled={!snapshot.reportComplete || !selected.size || removing} onclick={() => { manualRemoval = false; removalConfirmation = ""; removalError = ""; confirmOpen = true; }}><Icon name="trash" size={17}/>{removing ? "Снимаем…" : `Снять VIP у выбранных (${selected.size})`}</button></div></section>
       {/if}
     </main>
   </div>
@@ -326,5 +375,8 @@
 
 {#if confirmOpen}
   <!-- svelte-ignore a11y_interactive_supports_focus a11y_click_events_have_key_events -->
-  <div class="modal-backdrop" role="presentation" onclick={() => !removing && (confirmOpen = false)}><section class="confirm-modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}><div class="modal-icon"><Icon name="trash" size={25}/></div><h2>Снять VIP у {selected.size} {selected.size === 1 ? "пользователя" : "пользователей"}?</h2><p>Это изменит роли на Twitch. Для защиты введите логин подключённого канала: <strong>{snapshot.channelLogin}</strong></p><div class="selected-names">{selectedReport.slice(0,3).map((u: ReportUser) => u.displayName).join(", ")}{selected.size > 3 ? ` и ещё ${selected.size - 3}` : ""}</div><input class="danger-confirm-input" autocomplete="off" spellcheck="false" bind:value={removalConfirmation} placeholder={snapshot.channelLogin ?? "логин канала"}/>{#if removalError}<p class="modal-error">{removalError}</p>{/if}<div><button class="secondary-button" disabled={removing} onclick={() => confirmOpen = false}>Отмена</button><button class="danger-button" disabled={!confirmationMatches || removing} onclick={confirmRemoval}>{removing ? "Снимаем…" : "Да, снять VIP"}</button></div></section></div>
+  <div class="modal-backdrop" role="presentation" onclick={() => !removing && (confirmOpen = false)}><section class="confirm-modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}><div class="modal-icon"><Icon name="trash" size={25}/></div><h2>Снять VIP у {selectedReport.length} {selectedReport.length === 1 ? "пользователя" : "пользователей"}?</h2><p>Это изменит роли на Twitch. Для защиты введите логин подключённого канала: <strong>{snapshot.channelLogin}</strong></p><div class="selected-names">{selectedReport.slice(0,3).map((u) => u.displayName).join(", ")}{selectedReport.length > 3 ? ` и ещё ${selectedReport.length - 3}` : ""}</div><input class="danger-confirm-input" autocomplete="off" spellcheck="false" bind:value={removalConfirmation} placeholder={snapshot.channelLogin ?? "логин канала"}/>{#if removalError}<p class="modal-error">{removalError}</p>{/if}<div><button class="secondary-button" disabled={removing} onclick={() => confirmOpen = false}>Отмена</button><button class="danger-button" disabled={!confirmationMatches || removing || !selectedReport.length} onclick={confirmRemoval}>{removing ? "Снимаем…" : "Да, снять VIP"}</button></div></section></div>
+{/if}
+{#if dateEditor}
+<div class="modal-backdrop" role="presentation"><div class="confirm-modal" role="dialog" tabindex="-1" aria-modal="true" aria-label="Изменить дату сообщения"><h2>Последнее сообщение</h2><p>{dateEditor.name} · @{dateEditor.channel}</p><p>Дата, которую вы проверили вручную. Не меняет отметку «Писал сегодня» и не снимает VIP. Время — местное.</p><input class="danger-confirm-input" type="datetime-local" bind:value={editedDate}/>{#if dateError}<p class="modal-error">{dateError}</p>{/if}<div><button class="secondary-button" disabled={savingDate} onclick={() => dateEditor = null}>Отмена</button><button class="primary-button" disabled={savingDate || !editedDate} onclick={saveDate}>{savingDate ? "Сохраняем…" : "Сохранить"}</button></div></div></div>
 {/if}

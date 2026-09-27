@@ -55,7 +55,31 @@ impl AppState {
     }
 
     pub async fn snapshot(&self) -> AppSnapshot {
-        self.core.read().await.snapshot.clone()
+        let core = self.core.read().await;
+        let mut snapshot = core.snapshot.clone();
+        if let Some(auth) = &core.auth {
+            snapshot.last_messages = self
+                .storage
+                .last_messages(&auth.broadcaster_id)
+                .unwrap_or_default();
+        }
+        if let Some(auth) = &core.auth {
+            let streaks = self
+                .storage
+                .streaks(&auth.broadcaster_id)
+                .unwrap_or_default();
+            for vip in &mut snapshot.vips {
+                if let Some(count) = streaks.get(&vip.user_id) {
+                    vip.watch_streak = Some(*count);
+                }
+            }
+            for vip in &mut snapshot.report {
+                if let Some(count) = streaks.get(&vip.user_id) {
+                    vip.watch_streak = Some(*count);
+                }
+            }
+        }
+        snapshot
     }
 
     pub async fn emit_snapshot(&self, app: &AppHandle) {
@@ -86,6 +110,19 @@ impl AppState {
 
     pub async fn configure(&self, auth: AuthSession) {
         let mut core = self.core.write().await;
+        if core
+            .auth
+            .as_ref()
+            .is_some_and(|previous| previous.broadcaster_id != auth.broadcaster_id)
+        {
+            core.snapshot.vips.clear();
+            core.snapshot.report.clear();
+            core.snapshot.stream = None;
+            core.snapshot.vip_count = 0;
+            core.snapshot.report_complete = false;
+            core.chatters.clear();
+            core.chatters_overflowed = false;
+        }
         core.snapshot.configured = true;
         core.snapshot.channel_login = Some(auth.login.clone());
         core.snapshot.channel_display_name = Some(auth.display_name.clone());

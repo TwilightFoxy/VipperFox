@@ -39,6 +39,7 @@ export interface AppSnapshot {
   activities: ActivityEntry[];
   streakThreshold: number;
   lastError: string | null;
+  lastMessages?: Record<string, string>;
 }
 
 export interface ConnectRequest {

@@ -85,6 +85,7 @@ pub struct AppSnapshot {
     pub activities: Vec<ActivityEntry>,
     pub streak_threshold: u64,
     pub last_error: Option<String>,
+    pub last_messages: std::collections::HashMap<String, String>,
 }
 
 impl Default for AppSnapshot {
@@ -102,6 +103,7 @@ impl Default for AppSnapshot {
             activities: vec![],
             streak_threshold: 150,
             last_error: None,
+            last_messages: Default::default(),
         }
     }
 }
@@ -119,6 +121,8 @@ pub struct RemoveVipsRequest {
     pub user_ids: Vec<String>,
     /// Deliberately typed by the operator in the confirmation dialog.
     pub channel_confirmation: String,
+    #[serde(default)]
+    pub manual: bool,
 }
 
 #[derive(Debug, Clone)]

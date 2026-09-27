@@ -241,6 +241,26 @@ nav button b{margin-left:auto;background:#2c233c;color:#b990ff;border-radius:99p
 .empty-large h3{font-size:calc(12px * var(--font-scale));margin:10px 0 4px}
 .empty-large p{font-size:calc(8px * var(--font-scale))}
 .settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.vip-controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.vip-controls input,.vip-controls select{min-height:40px;border:1px solid var(--line);border-radius:10px;background:var(--panel-2);color:inherit;padding:8px 12px}
+.vip-search{flex:1;min-width:160px}
+.management-table .table-row{grid-template-columns:1.5fr .75fr .8fr 1.4fr .75fr;gap:10px}
+.last-message{font-size:12px;color:var(--muted)}
+.activity-note{font-size:12px;line-height:1.6;margin-bottom:10px}
+html[data-theme="animecul"] ::selection{background:#bce354;color:#14200d}
+html[data-theme="animecul"] input{accent-color:#bce354}
+html[data-theme="animecul"] nav button.active{box-shadow:inset 2px 0 #bce354;background:linear-gradient(90deg,rgba(188,227,84,.18),rgba(188,227,84,.04));color:#e9f6cb}
+html[data-theme="animecul"] .preset-buttons button.active,html[data-theme="animecul"] .report-list label.selected{background:rgba(188,227,84,.12);color:#e9f6cb;border-color:#89a94c;box-shadow:none}
+html[data-theme="animecul"] .report-list label.selected .checkmark{background:#bce354;color:#14200d;border-color:#bce354}
+html[data-theme="animecul"] .splash-glow,html[data-theme="animecul"] .ambient-one{background:#a6d543}
+html[data-theme="animecul"] .ambient-two{background:#47a782}
+html[data-theme="animecul"] .brand-copy h1 em{background-image:linear-gradient(100deg,#d6f59a,#89c843)}
+html[data-theme="animecul"] .orbit,html[data-theme="animecul"] .scope-list>div{border-color:rgba(188,227,84,.2)}
+html[data-theme="animecul"] .orbit i{background:#bce354;box-shadow:0 0 10px #bce354}
+html[data-theme="animecul"] .scope-list strong{color:#daf4ad}
+html[data-theme="animecul"] .guide-note{background:radial-gradient(circle at 50% 15%,rgba(188,227,84,.15),transparent 45%),#101c13;border-color:var(--line)}
+html[data-theme="animecul"] .steps button.active b,html[data-theme="animecul"] .steps button.done b{background:linear-gradient(135deg,#c5eb79,#78a237);box-shadow:0 0 18px rgba(188,227,84,.2);color:#14200d}
+html[data-theme="animecul"] .selected-names,html[data-theme="animecul"] .connect-pane input,html[data-theme="animecul"] .number-setting>div{background:#101c13;border-color:#34462d}
 .settings-card{padding:21px;display:grid;grid-template-columns:40px 1fr;gap:13px}
 .settings-icon{width:39px;height:39px;border-radius:11px;background:rgba(158,104,255,.1);color:#b27dff;display:grid;place-items:center}
 .settings-card h2{font-size:calc(12px * var(--font-scale));margin-top:2px}
@@ -323,3 +343,16 @@ to{opacity:1;transform:none}
 }
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
+html[data-theme="animecul"] .flow-node>svg{background:#263b20;color:#c5ef58}
+html[data-theme="animecul"] .offline-state .moon{color:#b8d779;filter:drop-shadow(0 0 16px rgba(188,227,84,.25))}
+html[data-theme="animecul"] .stat-card{background:linear-gradient(145deg,#1c2b20,#111b15)}
+html[data-theme="animecul"] :focus-visible{outline-color:#c5ef58}
+.last-message .text-button{display:block;margin:5px 0 0}
+html[data-theme="animecul"] .preset-buttons button,html[data-theme="animecul"] .report-list label{background:#152219;color:#b9c9b7}
+html[data-theme="animecul"] .preset-buttons button:hover{background:#293b23;color:#e9f6cb}
+html[data-theme="animecul"] .report-list label.selected{background:#293b23}
+html[data-theme="animecul"] .danger-confirm-input{background:#101a14}
+.management-table .secondary-button.danger{margin-top:0}
+.report-list{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+.report-list label{height:auto;min-height:66px;flex-wrap:wrap;padding:10px}
+.report-list .status-chip{white-space:normal;line-height:1.6}

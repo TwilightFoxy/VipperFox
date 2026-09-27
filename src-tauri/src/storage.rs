@@ -20,6 +20,13 @@ impl Storage {
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS last_messages (
+                    channel_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    PRIMARY KEY(channel_id,user_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS watch_streaks (channel_id TEXT NOT NULL,user_id TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(channel_id,user_id));
                  CREATE TABLE IF NOT EXISTS activities (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     kind TEXT NOT NULL,
@@ -32,6 +39,60 @@ impl Storage {
         Ok(Self {
             connection: Mutex::new(connection),
         })
+    }
+
+    pub fn record_message(&self, channel: &str, user: &str, timestamp: &str) -> Result<(), String> {
+        self.connection.lock().map_err(|_| "Database lock failed")?
+            .execute("INSERT INTO last_messages(channel_id,user_id,timestamp) VALUES(?1,?2,?3) ON CONFLICT(channel_id,user_id) DO UPDATE SET timestamp=MAX(last_messages.timestamp,excluded.timestamp)", params![channel,user,timestamp])
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn last_messages(
+        &self,
+        channel: &str,
+    ) -> Result<std::collections::HashMap<String, String>, String> {
+        let connection = self.connection.lock().map_err(|_| "Database lock failed")?;
+        let mut statement = connection
+            .prepare("SELECT user_id,timestamp FROM last_messages WHERE channel_id=?1")
+            .map_err(|error| error.to_string())?;
+        let result = statement
+            .query_map([channel], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|error| error.to_string());
+        result
+    }
+
+    pub fn set_message_date(
+        &self,
+        channel: &str,
+        user: &str,
+        timestamp: &str,
+    ) -> Result<(), String> {
+        self.connection.lock().map_err(|_| "Database lock failed")?
+            .execute("INSERT INTO last_messages(channel_id,user_id,timestamp) VALUES(?1,?2,?3) ON CONFLICT(channel_id,user_id) DO UPDATE SET timestamp=excluded.timestamp", params![channel,user,timestamp]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn record_streak(&self, channel: &str, user: &str, count: u64) -> Result<(), String> {
+        let count = i64::try_from(count).map_err(|_| "Некорректная серия")?;
+        self.connection.lock().map_err(|_| "Database lock failed")?
+            .execute("INSERT INTO watch_streaks(channel_id,user_id,count) VALUES(?1,?2,?3) ON CONFLICT(channel_id,user_id) DO UPDATE SET count=excluded.count", params![channel,user,count]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn streaks(&self, channel: &str) -> Result<std::collections::HashMap<String, u64>, String> {
+        let connection = self.connection.lock().map_err(|_| "Database lock failed")?;
+        let mut query = connection
+            .prepare("SELECT user_id,count FROM watch_streaks WHERE channel_id=?1")
+            .map_err(|e| e.to_string())?;
+        let result = query
+            .query_map([channel], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string());
+        result
     }
 
     pub fn setting(&self, key: &str) -> Result<Option<String>, String> {
@@ -165,6 +226,75 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_database_is_extended_without_losing_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.db");
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO settings VALUES('streak_threshold','150');").unwrap();
+        drop(old);
+        let storage = Storage::open(&path).unwrap();
+        assert_eq!(
+            storage.setting("streak_threshold").unwrap().as_deref(),
+            Some("150")
+        );
+        storage
+            .set_message_date("channel", "42", "2026-09-01T12:00:00+00:00")
+            .unwrap();
+        storage.record_streak("channel", "42", 150).unwrap();
+        assert_eq!(storage.streaks("channel").unwrap()["42"], 150);
+    }
+
+    #[test]
+    fn activity_survives_reopen_and_is_isolated_by_channel() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.db");
+        {
+            let storage = Storage::open(&path).unwrap();
+            storage.set_setting("client_id", "existing-client").unwrap();
+            storage
+                .record_message("channel-a", "viewer", "2026-09-27T12:00:00+00:00")
+                .unwrap();
+            storage
+                .record_message("channel-a", "viewer", "2026-09-26T12:00:00+00:00")
+                .unwrap();
+        }
+        let storage = Storage::open(&path).unwrap();
+        assert_eq!(
+            storage.last_messages("channel-a").unwrap()["viewer"],
+            "2026-09-27T12:00:00+00:00"
+        );
+        assert!(storage.last_messages("channel-b").unwrap().is_empty());
+        assert_eq!(
+            storage.setting("client_id").unwrap().as_deref(),
+            Some("existing-client")
+        );
+    }
+
+    #[test]
+    fn manual_date_and_streak_survive_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.db");
+        {
+            let storage = Storage::open(&path).unwrap();
+            storage
+                .record_message("a", "42", "2026-09-27T12:00:00+00:00")
+                .unwrap();
+            storage
+                .set_message_date("a", "42", "2026-09-25T12:00:00+00:00")
+                .unwrap();
+            storage.record_streak("a", "42", 150).unwrap();
+            storage.record_streak("a", "42", 3).unwrap();
+        }
+        let storage = Storage::open(&path).unwrap();
+        assert_eq!(
+            storage.last_messages("a").unwrap()["42"],
+            "2026-09-25T12:00:00+00:00"
+        );
+        assert_eq!(storage.streaks("a").unwrap()["42"], 3);
+        assert!(storage.streaks("b").unwrap().is_empty());
+    }
 
     #[test]
     fn settings_and_history_round_trip() {

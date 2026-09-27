@@ -124,6 +124,42 @@ async fn refresh_vips(app: AppHandle, state: State<'_, AppState>) -> Result<AppS
 }
 
 #[tauri::command]
+async fn set_last_message(
+    user_id: String,
+    timestamp: String,
+    channel_login: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppSnapshot, String> {
+    let core = state.core.read().await;
+    let auth = core.auth.as_ref().ok_or("Twitch не подключён")?;
+    if !auth.login.eq_ignore_ascii_case(&channel_login)
+        || !core.snapshot.vips.iter().any(|v| v.user_id == user_id)
+    {
+        return Err("Канал или список VIP изменился. Обновите список".into());
+    }
+    let date = chrono::DateTime::parse_from_rfc3339(&timestamp)
+        .map_err(|_| "Некорректная дата")?
+        .with_timezone(&chrono::Utc);
+    if date > chrono::Utc::now() || date.timestamp() < 0 {
+        return Err("Укажите дату в прошлом".into());
+    }
+    state
+        .storage
+        .set_message_date(&auth.broadcaster_id, &user_id, &date.to_rfc3339())?;
+    drop(core);
+    state
+        .push_activity(
+            ActivityKind::System,
+            "Дата сообщения изменена вручную",
+            &format!("ID {user_id}: {}", date.to_rfc3339()),
+        )
+        .await;
+    state.emit_snapshot(&app).await;
+    Ok(state.snapshot().await)
+}
+
+#[tauri::command]
 async fn remove_vips(
     request: RemoveVipsRequest,
     app: AppHandle,
@@ -164,13 +200,13 @@ async fn remove_vips_inner(
             "Операция отменена: пользователь {missing} уже отсутствует в актуальном списке VIP"
         ));
     }
-    if state.twitch.live_stream(&auth).await?.is_some() {
+    if !request.manual && state.twitch.live_stream(&auth).await?.is_some() {
         return Err("Снятие VIP отменено: Twitch сообщает, что канал сейчас в эфире".into());
     }
 
     for (index, user_id) in request.user_ids.iter().enumerate() {
         let current = state.snapshot().await;
-        if current.stream.is_some() || !current.report_complete {
+        if !request.manual && (current.stream.is_some() || !current.report_complete) {
             return Err(format!(
                 "Операция безопасно остановлена после {index} снятий: состояние трансляции изменилось"
             ));
@@ -183,11 +219,21 @@ async fn remove_vips_inner(
                 "Операция безопасно остановлена после {index} снятий: подключён другой канал"
             ));
         }
-        if state.twitch.live_stream(&auth).await?.is_some() {
+        if !request.manual && state.twitch.live_stream(&auth).await?.is_some() {
             return Err(format!(
                 "Операция безопасно остановлена после {index} снятий: Twitch сообщает о начале эфира"
             ));
         }
+        let latest_auth = state.auth().await.ok_or("Twitch отключён")?;
+        if latest_auth.broadcaster_id != auth.broadcaster_id {
+            return Err("Канал изменился: операция остановлена".into());
+        }
+        let remaining = RemoveVipsRequest {
+            user_ids: request.user_ids[index..].to_vec(),
+            channel_confirmation: request.channel_confirmation.clone(),
+            manual: request.manual,
+        };
+        validate_removal_request(&state.snapshot().await, &auth, &remaining)?;
         state.twitch.remove_vip(&auth, user_id).await?;
         let display_name = {
             let mut core = state.core.write().await;
@@ -207,7 +253,11 @@ async fn remove_vips_inner(
             .push_activity(
                 ActivityKind::VipRemove,
                 &format!("{display_name} лишён VIP"),
-                "Ручное действие из отчёта VipperFox",
+                if request.manual {
+                    "Ручное действие из списка VIP"
+                } else {
+                    "Ручное действие из отчёта VipperFox"
+                },
             )
             .await;
         state.emit_snapshot(app).await;
@@ -234,10 +284,10 @@ fn validate_removal_request(
             "За одну операцию можно снять VIP максимум у {MAX_REMOVALS_PER_OPERATION} пользователей"
         ));
     }
-    if snapshot.stream.is_some() {
+    if !request.manual && snapshot.stream.is_some() {
         return Err("Снятие VIP заблокировано до завершения трансляции".into());
     }
-    if !snapshot.report_complete {
+    if !request.manual && !snapshot.report_complete {
         return Err(
             "Снятие VIP заблокировано: мониторинг трансляции был неполным. Проверьте пользователей вручную в Twitch"
                 .into(),
@@ -255,11 +305,19 @@ fn validate_removal_request(
     if unique.len() != request.user_ids.len() || unique.iter().any(|id| id.trim().is_empty()) {
         return Err("Список пользователей повреждён или содержит повторы".into());
     }
-    let report_ids: HashSet<&str> = snapshot
-        .report
-        .iter()
-        .map(|user| user.user_id.as_str())
-        .collect();
+    let report_ids: HashSet<&str> = if request.manual {
+        snapshot
+            .vips
+            .iter()
+            .map(|user| user.user_id.as_str())
+            .collect()
+    } else {
+        snapshot
+            .report
+            .iter()
+            .map(|user| user.user_id.as_str())
+            .collect()
+    };
     if !unique.is_subset(&report_ids) {
         return Err("Операция отменена: выбран пользователь не из текущего отчёта".into());
     }
@@ -362,7 +420,8 @@ pub fn run() {
             disconnect_twitch,
             set_streak_threshold,
             refresh_vips,
-            remove_vips
+            remove_vips,
+            set_last_message
         ])
         .run(tauri::generate_context!())
         .expect("failed to run VipperFox");
@@ -399,6 +458,7 @@ mod safety_tests {
             activities: vec![],
             streak_threshold: 150,
             last_error: None,
+            last_messages: Default::default(),
         };
         let auth = AuthSession {
             client_id: "client".into(),
@@ -410,6 +470,7 @@ mod safety_tests {
         let request = RemoveVipsRequest {
             user_ids: vec!["42".into()],
             channel_confirmation: "fox_channel".into(),
+            manual: false,
         };
         (snapshot, auth, request)
     }
@@ -418,6 +479,23 @@ mod safety_tests {
     fn valid_completed_report_is_allowed() {
         let (snapshot, auth, request) = fixture(true, false);
         assert!(validate_removal_request(&snapshot, &auth, &request).is_ok());
+    }
+
+    #[test]
+    fn manual_removal_requires_a_current_vip_and_channel_confirmation() {
+        let (mut snapshot, auth, mut request) = fixture(false, true);
+        request.manual = true;
+        assert!(validate_removal_request(&snapshot, &auth, &request).is_err());
+        snapshot.vips.push(models::VipUser {
+            user_id: "42".into(),
+            login: "viewer".into(),
+            display_name: "Viewer".into(),
+            watch_streak: None,
+            wrote_this_stream: true,
+        });
+        assert!(validate_removal_request(&snapshot, &auth, &request).is_ok());
+        request.channel_confirmation = "wrong-channel".into();
+        assert!(validate_removal_request(&snapshot, &auth, &request).is_err());
     }
 
     #[test]

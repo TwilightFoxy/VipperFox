@@ -419,6 +419,10 @@ async fn handle_event(
         }
         "channel.chat.message" => {
             let user_id = text(event, "chatter_user_id")?;
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            state
+                .storage
+                .record_message(&auth.broadcaster_id, &user_id, &timestamp)?;
             let mut core = state.core.write().await;
             if core.chatters.len() >= MAX_CHATTERS_PER_STREAM && !core.chatters.contains(&user_id) {
                 core.chatters_overflowed = true;
@@ -445,6 +449,44 @@ async fn handle_event(
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             let user_id = text(event, "chatter_user_id")?;
+            if count == 0 {
+                return Ok(());
+            }
+            if event
+                .get("source_broadcaster_user_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id != auth.broadcaster_id)
+            {
+                return Ok(());
+            }
+            state
+                .storage
+                .record_streak(&auth.broadcaster_id, &user_id, count)?;
+            if event
+                .pointer("/message/text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+            {
+                state.storage.record_message(
+                    &auth.broadcaster_id,
+                    &user_id,
+                    &chrono::Utc::now().to_rfc3339(),
+                )?;
+                let mut core = state.core.write().await;
+                if core.chatters.len() < MAX_CHATTERS_PER_STREAM || core.chatters.contains(&user_id)
+                {
+                    core.chatters.insert(user_id.clone());
+                    if let Some(vip) = core.snapshot.vips.iter_mut().find(|v| v.user_id == user_id)
+                    {
+                        vip.wrote_this_stream = true;
+                    }
+                } else {
+                    core.chatters_overflowed = true;
+                    if let Some(stream) = core.snapshot.stream.as_mut() {
+                        stream.complete = false;
+                    }
+                }
+            }
             let login = text(event, "chatter_user_login")?;
             let display_name = text(event, "chatter_user_name")?;
             let (threshold, already_vip, wrote, stream_active) = {
