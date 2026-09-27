@@ -1,10 +1,12 @@
 # VipperFox
 
+В версии 0.1.5: отметки «Писал сегодня» в таблице VIP доступны и офлайн; в настройках можно выбрать VipperFox или «Анимекул эдишин». Тема сохраняется после перезапуска. Исправлена обработка пустых и служебных кадров EventSub, добавлено отображение ошибок мониторинга и резервная проверка статуса эфира. При резервном обнаружении эфира отчёт считается неполным, снятие VIP блокируется.
+
 Локальное Windows-приложение для управления Twitch VIP. VipperFox подключается к EventSub, отмечает VIP, которые написали хотя бы одно сообщение за текущую трансляцию, и автоматически выдаёт VIP после официального уведомления Twitch о Watch Streak.
 
 ## Скачать
 
-Готовый установщик Windows x64: [VipperFox 0.1.4](https://github.com/TwilightFoxy/vipperfox/releases/download/v0.1.4/VipperFox_0.1.4_x64-setup.exe).
+Готовый установщик Windows x64: [VipperFox 0.1.5](https://github.com/TwilightFoxy/vipperfox/releases/download/v0.1.5/VipperFox_0.1.5_x64-setup.exe).
 
 SHA-256: `E2A3BF984DCF9E135CEE61CFDCC2A0B866897AFF69BF747C85BD6B5EE475A395`
 

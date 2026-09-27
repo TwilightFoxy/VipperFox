@@ -2,12 +2,15 @@ use crate::{
     models::{ActivityKind, ConnectionStatus, ReportUser, StreamInfo, VipUser},
     state::AppState,
 };
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 use tauri::AppHandle;
 use tokio::time::{sleep, Duration};
-use tokio_tungstenite::{connect_async_with_config, tungstenite::protocol::WebSocketConfig};
+use tokio_tungstenite::{
+    connect_async_with_config,
+    tungstenite::{protocol::WebSocketConfig, Message},
+};
 
 const EVENTSUB_URL: &str = "wss://eventsub.wss.twitch.tv/ws";
 const MAX_CHATTERS_PER_STREAM: usize = 100_000;
@@ -18,6 +21,58 @@ enum ConnectionExit {
 }
 
 pub async fn run(app: AppHandle, state: AppState, generation: u64) {
+    let poll_state = state.clone();
+    let poll_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while poll_state.generation_is(generation) {
+            if let Some(auth) = poll_state.auth().await {
+                if let Ok(live) = poll_state.twitch.live_stream(&auth).await {
+                    if !poll_state.generation_is(generation) {
+                        break;
+                    }
+                    let mut core = poll_state.core.write().await;
+                    if core.snapshot.connection_status == ConnectionStatus::Connected {
+                        drop(core);
+                        sleep(Duration::from_secs(30)).await;
+                        continue;
+                    }
+                    if let Some(live) = live {
+                        if core
+                            .snapshot
+                            .stream
+                            .as_ref()
+                            .is_none_or(|stream| stream.id != live.id)
+                        {
+                            core.chatters.clear();
+                            core.snapshot.report.clear();
+                            core.snapshot.stream = Some(StreamInfo {
+                                id: live.id,
+                                started_at: live.started_at,
+                                complete: false,
+                            });
+                            for vip in &mut core.snapshot.vips {
+                                vip.wrote_this_stream = false;
+                            }
+                        }
+                    } else if core.snapshot.stream.is_some() {
+                        core.snapshot.report = core
+                            .snapshot
+                            .vips
+                            .iter()
+                            .filter(|vip| !vip.wrote_this_stream)
+                            .map(ReportUser::from)
+                            .collect();
+                        core.snapshot.report_complete = false;
+                        core.snapshot.stream = None;
+                        core.chatters.clear();
+                    }
+                    drop(core);
+                    poll_state.emit_snapshot(&poll_app).await;
+                }
+            }
+            sleep(Duration::from_secs(30)).await;
+        }
+    });
     let mut delay = 1_u64;
     let mut url = EVENTSUB_URL.to_owned();
     let mut transferred = false;
@@ -78,24 +133,40 @@ async fn connection(
     let socket_config = WebSocketConfig::default()
         .max_message_size(Some(1 << 20))
         .max_frame_size(Some(1 << 20));
-    let (socket, _) = tokio::time::timeout(
+    let (mut socket, _) = tokio::time::timeout(
         Duration::from_secs(20),
         connect_async_with_config(url, Some(socket_config), false),
     )
     .await
     .map_err(|_| "Тайм-аут подключения EventSub".to_owned())?
     .map_err(|error| format!("EventSub WebSocket: {error}"))?;
-    // Keep the write half alive for the entire EventSub session. Dropping it here
-    // would close the WebSocket before notifications can arrive.
-    let (_outgoing, mut incoming) = socket.split();
-    let welcome = tokio::time::timeout(Duration::from_secs(15), incoming.next())
-        .await
-        .map_err(|_| "EventSub не прислал приветствие вовремя".to_owned())?
-        .ok_or("EventSub закрыл соединение до приветствия")?
-        .map_err(|error| error.to_string())?;
-    let welcome: Value =
-        serde_json::from_str(welcome.to_text().map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
+    let welcome = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let message = socket
+                .next()
+                .await
+                .ok_or("EventSub закрыл соединение до приветствия")?
+                .map_err(|error| format!("EventSub до приветствия: {error}"))?;
+            if message.is_ping() {
+                socket
+                    .flush()
+                    .await
+                    .map_err(|error| format!("EventSub pong: {error}"))?;
+            }
+            if let Some(payload) = parse_eventsub_frame(&message)? {
+                if payload
+                    .pointer("/metadata/message_type")
+                    .and_then(Value::as_str)
+                    != Some("session_welcome")
+                {
+                    return Err("EventSub: ожидалось session_welcome".to_owned());
+                }
+                return Ok(payload);
+            }
+        }
+    })
+    .await
+    .map_err(|_| "EventSub не прислал приветствие вовремя".to_owned())??;
     let session_id = welcome
         .pointer("/payload/session/id")
         .and_then(Value::as_str)
@@ -131,7 +202,7 @@ async fn connection(
 
     loop {
         let message =
-            tokio::time::timeout(Duration::from_secs(keepalive_timeout + 5), incoming.next())
+            tokio::time::timeout(Duration::from_secs(keepalive_timeout + 5), socket.next())
                 .await
                 .map_err(|_| {
                     "EventSub перестал присылать keepalive; соединение считается потерянным"
@@ -144,11 +215,15 @@ async fn connection(
             return Ok(ConnectionExit::Closed);
         }
         let message = message.map_err(|error| error.to_string())?;
-        if !message.is_text() {
-            continue;
+        if message.is_ping() {
+            socket
+                .flush()
+                .await
+                .map_err(|error| format!("EventSub pong: {error}"))?;
         }
-        let payload: Value = serde_json::from_str(message.to_text().unwrap_or_default())
-            .map_err(|error| error.to_string())?;
+        let Some(payload) = parse_eventsub_frame(&message)? else {
+            continue;
+        };
         let message_type = payload
             .pointer("/metadata/message_type")
             .and_then(Value::as_str)
@@ -188,6 +263,24 @@ async fn connection(
         handle_event(app, state, &auth, event_type, &event).await?;
     }
     Ok(ConnectionExit::Closed)
+}
+
+fn parse_eventsub_frame(message: &Message) -> Result<Option<Value>, String> {
+    match message {
+        Message::Text(text) if text.trim().is_empty() => Ok(None),
+        Message::Text(text) => serde_json::from_str(text)
+            .map(Some)
+            .map_err(|error| format!("EventSub: некорректный JSON события: {error}")),
+        Message::Close(frame) => Err(match frame {
+            Some(frame) => format!(
+                "EventSub закрыл соединение: код {}, причина: {}",
+                frame.code, frame.reason
+            ),
+            None => "EventSub закрыл соединение без указания причины".into(),
+        }),
+        Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => Ok(None),
+        Message::Binary(_) => Err("EventSub: неожиданный бинарный кадр вместо JSON".into()),
+    }
 }
 
 async fn reconcile(state: &AppState, auth: &crate::models::AuthSession) -> Result<(), String> {
@@ -454,6 +547,29 @@ fn text(value: &Value, key: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_and_empty_frames_are_not_parsed_as_json() {
+        for frame in [
+            Message::Ping(vec![].into()),
+            Message::Pong(vec![].into()),
+            Message::Text("".into()),
+            Message::Text("  ".into()),
+        ] {
+            assert!(parse_eventsub_frame(&frame).unwrap().is_none());
+        }
+        assert!(parse_eventsub_frame(&Message::Close(None))
+            .unwrap_err()
+            .contains("закрыл соединение"));
+        assert!(parse_eventsub_frame(&Message::Text("{".into()))
+            .unwrap_err()
+            .contains("некорректный JSON"));
+        let welcome = Message::Text(r#"{"metadata":{"message_type":"session_welcome"}}"#.into());
+        assert_eq!(
+            parse_eventsub_frame(&welcome).unwrap().unwrap()["metadata"]["message_type"],
+            "session_welcome"
+        );
+    }
 
     #[test]
     fn report_contains_only_silent_vips() {

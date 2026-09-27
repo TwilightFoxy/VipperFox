@@ -1,4 +1,25 @@
 :root{font-family:Manrope,"Segoe UI",sans-serif;color:#f5f2fa;background:#0b0812;font-synthesis:none;text-rendering:optimizeLegibility;--font-scale:1.18;--bg:#0b0812;--panel:#15111f;--panel-2:#1b1528;--line:rgba(255,255,255,.075);--muted:#9891a9;--violet:#9e68ff;--violet-2:#7440dc;--green:#52d5a8;--amber:#f5b95b;--red:#ff6d83;--blue:#74a7ff}
+.theme-card{margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:20px}
+.theme-card p{font-size:12px;margin-top:8px}
+.theme-options{display:flex;gap:12px}
+.theme-options button{display:flex;align-items:center;gap:14px;padding:12px 18px;background:var(--panel-2);border:1px solid var(--line);border-radius:14px;cursor:pointer;text-align:left}
+.theme-options button.chosen{border-color:var(--violet);box-shadow:0 0 0 2px color-mix(in srgb,var(--violet) 20%,transparent)}
+.theme-options img{width:50px;height:58px;object-fit:contain}
+.theme-options strong,.theme-options small{display:block}
+.theme-options small{color:var(--muted);margin-top:5px;font-size:11px}
+html[data-theme="animecul"]{--bg:#09120e;--panel:#111e16;--panel-2:#1c2c1c;--violet:#c5ef58;--violet-2:#86b837;--muted:#a4b5a6;--line:rgba(201,236,159,.12);color:#f4f9ed;background:var(--bg)}
+html[data-theme="animecul"] .app-shell,html[data-theme="animecul"] .onboarding,html[data-theme="animecul"] .splash{background:radial-gradient(ellipse at 80% 0%,rgba(157,210,57,.12),transparent 55%),var(--bg)}
+html[data-theme="animecul"] .panel,html[data-theme="animecul"] .report-drawer,html[data-theme="animecul"] .setup-card,html[data-theme="animecul"] .confirm-modal{background:linear-gradient(145deg,#18251a,#101a14);border-color:var(--line)}
+html[data-theme="animecul"] .sidebar,html[data-theme="animecul"] .titlebar{background:#0b160f}
+html[data-theme="animecul"] .section-kicker,html[data-theme="animecul"] .overline,html[data-theme="animecul"] .text-button,html[data-theme="animecul"] .spark,html[data-theme="animecul"] .streak-star{color:var(--violet)}
+html[data-theme="animecul"] .primary-button,html[data-theme="animecul"] .user-cell>b,html[data-theme="animecul"] .avatar{background:linear-gradient(135deg,#d2f47a,#8bb937);color:#16220e;box-shadow:0 6px 22px rgba(168,210,60,.15)}
+html[data-theme="animecul"] nav button.active,html[data-theme="animecul"] .settings-icon,html[data-theme="animecul"] .vip-badge{background:rgba(184,224,90,.12);color:#d0ef8a;border-color:rgba(184,224,90,.25)}
+html[data-theme="animecul"] .stat-card.violet{background:linear-gradient(130deg,#25351d,#152319)}
+html[data-theme="animecul"] .stat-icon,html[data-theme="animecul"] .auto-pill{color:#d0ef8a;background:rgba(184,224,90,.12)}
+html[data-theme="animecul"] .sidebar-fox img,html[data-theme="animecul"] .fox-stage img,html[data-theme="animecul"] .splash img{filter:drop-shadow(0 0 24px rgba(188,232,67,.28));object-fit:contain}
+html[data-theme="animecul"] .secondary-button,html[data-theme="animecul"] .status-chip{background:#233126;color:#bfceba}
+html[data-theme="animecul"] .status-chip.yes{background:#253c24;color:#d0ef8a}
+@media(max-width:1100px){.theme-card{align-items:stretch;flex-direction:column}.theme-options{flex-wrap:wrap}}
 html[data-font-size="normal"]{--font-scale:1}
 html[data-font-size="large"]{--font-scale:1.18}
 html[data-font-size="xlarge"]{--font-scale:1.38}

@@ -9,6 +9,15 @@
   import { MAX_REMOVALS_PER_OPERATION, canAddSelection, channelConfirmationMatches, selectSafeBatch } from "./lib/removalSafety";
   import type { AppSnapshot, ReportUser } from "./lib/types";
 
+  type Theme = "fox" | "animecul";
+  let theme: Theme = localStorage.getItem("vipperfox-theme") === "animecul" ? "animecul" : "fox";
+  $: mascot = theme === "animecul" ? "/animecul.png" : "/fox.png";
+  $: document.documentElement.dataset.theme = theme;
+  function chooseTheme(value: Theme) {
+    theme = value;
+    localStorage.setItem("vipperfox-theme", value);
+  }
+
   type View = "dashboard" | "vips" | "history" | "settings";
   type InterfaceSize = "compact" | "standard" | "large";
   type FontSize = "normal" | "large" | "xlarge";
@@ -195,7 +204,7 @@
 {#if loading}
   <div class="splash">
     <div class="splash-glow"></div>
-    <img src="/fox.png" alt="VipperFox" />
+    <img src={mascot} alt="VipperFox" />
     <div class="splash-word">Vipper<span>Fox</span></div>
     <div class="loading-dots"><i></i><i></i><i></i></div>
   </div>
@@ -205,7 +214,7 @@
     <section class="onboard-brand">
       <div class="fox-stage">
         <div class="orbit"><i></i><i></i><i></i></div>
-        <img src="/fox.png" alt="Фиолетовый лис VipperFox" />
+        <img src={mascot} alt="Фиолетовый лис VipperFox" />
       </div>
       <div class="brand-copy">
         <span class="overline">TWITCH VIP COMPANION</span>
@@ -236,7 +245,7 @@
             {#if externalError}<div class="form-error"><Icon name="x" size={16}/>{externalError}</div>{/if}
             <button class="text-button" onclick={() => guideStep = 2}>У меня уже есть данные <Icon name="chevron" size={16}/></button>
           </div>
-          <aside class="guide-note"><div class="note-fox"><img src="/fox.png" alt=""/></div><strong>Лисий совет</strong><p>Не отправляйте токен другим людям. VipperFox сохранит его в защищённом хранилище Windows.</p></aside>
+          <aside class="guide-note"><div class="note-fox"><img src={mascot} alt=""/></div><strong>Лисий совет</strong><p>Не отправляйте токен другим людям. VipperFox сохранит его в защищённом хранилище Windows.</p></aside>
         </div>
       {:else}
         <form class="connect-pane" onsubmit={(event) => { event.preventDefault(); connect(); }}>
@@ -255,7 +264,7 @@
 {:else}
   <div class="app-shell">
     <div class="titlebar" data-tauri-drag-region>
-      <div class="title-brand" data-tauri-drag-region><img src="/fox.png" alt=""/><b>Vipper<span>Fox</span></b></div>
+      <div class="title-brand" data-tauri-drag-region><img src={mascot} alt=""/><b>Vipper<span>Fox</span></b></div>
       <div class="window-controls"><button aria-label="Свернуть" onclick={() => !previewMode && getCurrentWindow().minimize()}>—</button><button class="close" aria-label="Закрыть" onclick={() => !previewMode && getCurrentWindow().close()}>×</button></div>
     </div>
     <aside class="sidebar">
@@ -266,11 +275,12 @@
         <button class:active={view === "history"} onclick={() => view = "history"}><Icon name="history"/><span>История</span></button>
         <button class:active={view === "settings"} onclick={() => view = "settings"}><Icon name="settings"/><span>Настройки</span></button>
       </nav>
-      <div class="sidebar-fox"><span class="spark s1">✦</span><span class="spark s2">✧</span><img src="/fox.png" alt="VipperFox"/><p>{snapshot.stream ? "Я слежу за чатом!" : "Жду следующий стрим"}</p></div>
+      <div class="sidebar-fox"><span class="spark s1">✦</span><span class="spark s2">✧</span><img src={mascot} alt="VipperFox"/><p>{snapshot.stream ? "Я слежу за чатом!" : "Жду следующий стрим"}</p></div>
       <div class="connection-line"><i class:online={snapshot.connectionStatus === "connected"}></i><span>{snapshot.connectionStatus === "connected" ? "EventSub подключён" : "Нет соединения"}</span></div>
     </aside>
 
     <main class="content">
+      {#if snapshot.lastError}<div class="warning-banner"><div><Icon name="shield"/><span><strong>Ошибка мониторинга Twitch</strong><small>{snapshot.lastError}</small></span></div></div>{/if}
       {#if view === "dashboard"}
         <header class="page-header"><div><span class="section-kicker">ДОБРЫЙ ВЕЧЕР</span><h1>Всё под контролем <span>✦</span></h1><p>VipperFox наблюдает за каналом и сохраняет только нужные события.</p></div><div class="header-actions"><button class="icon-button"><Icon name="history"/></button><div class="live-badge" class:offline={!snapshot.stream}><i></i>{snapshot.stream ? "LIVE" : "OFFLINE"}</div></div></header>
 
@@ -298,13 +308,13 @@
       {:else if view === "vips"}
         <header class="page-header"><div><span class="section-kicker">УПРАВЛЕНИЕ</span><h1>VIP-зрители</h1><p>Список доступен и обновляется даже когда канал офлайн.</p></div><div class="header-actions"><button class="secondary-button" disabled={refreshingVips} onclick={reloadVips}>{refreshingVips ? "Обновляем…" : "Обновить список"}</button><div class="live-badge" class:offline={!snapshot.stream}><i></i>{snapshot.stream ? "МОНИТОРИНГ" : "ОЖИДАНИЕ"}</div></div></header>
         {#if refreshError}<div class="warning-banner"><div><Icon name="shield"/><span><strong>Не удалось обновить VIP</strong><small>{refreshError}</small></span></div></div>{/if}
-        <section class="panel table-panel"><div class="panel-head"><div><h2>Текущий список</h2><span class="table-summary">{snapshot.stream ? `${activeVips} активны · ${silentVips} молчат` : "Канал офлайн · список доступен"}</span></div><div class="search-mock">⌕ <span>Поиск зрителя</span></div></div><div class="vip-table"><div class="table-row table-header"><span>Пользователь</span><span>Watch Streak</span><span>Текущий стрим</span><span>Статус</span></div>{#each snapshot.vips as vip, index}<div class="table-row" style={`--delay:${index * 40}ms`}><span class="user-cell"><b>{vip.displayName.slice(0,1).toUpperCase()}</b><span><strong>{vip.displayName}</strong><small>@{vip.login}</small></span></span><span>{vip.watchStreak ?? "—"}{#if vip.watchStreak && vip.watchStreak >= snapshot.streakThreshold}<em class="streak-star">✦</em>{/if}</span><span><span class:yes={snapshot.stream && vip.wroteThisStream} class="status-chip">{snapshot.stream ? (vip.wroteThisStream ? "✓ Писал" : "Ещё нет") : "Канал офлайн"}</span></span><span><span class="vip-badge">VIP</span></span></div>{/each}</div></section>
+        <section class="panel table-panel"><div class="panel-head"><div><h2>Текущий список</h2><span class="table-summary">{snapshot.stream ? `${activeVips} активны · ${silentVips} молчат` : "Канал офлайн · список доступен"}</span></div><div class="search-mock">⌕ <span>Поиск зрителя</span></div></div><div class="vip-table"><div class="table-row table-header"><span>Пользователь</span><span>Watch Streak</span><span>Писал сегодня</span><span>Статус</span></div>{#each snapshot.vips as vip, index}<div class="table-row" style={`--delay:${index * 40}ms`}><span class="user-cell"><b>{vip.displayName.slice(0,1).toUpperCase()}</b><span><strong>{vip.displayName}</strong><small>@{vip.login}</small></span></span><span>{vip.watchStreak ?? "—"}{#if vip.watchStreak && vip.watchStreak >= snapshot.streakThreshold}<em class="streak-star">✦</em>{/if}</span><span><span class:yes={vip.wroteThisStream} class="status-chip">{vip.wroteThisStream ? "✓ Писал" : "— Не отмечен"}</span></span><span><span class="vip-badge">VIP</span></span></div>{/each}</div></section>
       {:else if view === "history"}
         <header class="page-header"><div><span class="section-kicker">ЖУРНАЛ</span><h1>История действий</h1><p>Выдача VIP, ручные снятия и состояние мониторинга.</p></div></header>
         <section class="panel history-panel">{#each snapshot.activities as activity}<div class="history-row"><div class:remove={activity.kind === "vip_remove"} class:warning={activity.kind === "warning"} class="activity-icon"><Icon name={activity.kind === "vip_add" ? "sparkles" : activity.kind === "vip_remove" ? "trash" : "shield"}/></div><div><strong>{activity.title}</strong><p>{activity.detail}</p></div><time>{new Intl.DateTimeFormat("ru", {day:"2-digit",month:"long",hour:"2-digit",minute:"2-digit"}).format(new Date(activity.createdAt))}</time></div>{:else}<div class="empty-large"><Icon name="history" size={34}/><h3>История пока пуста</h3><p>Первое событие появится после подключения Twitch.</p></div>{/each}</section>
       {:else}
         <header class="page-header"><div><span class="section-kicker">ПАРАМЕТРЫ</span><h1>Настройки</h1><p>Поведение автоматизации и подключение канала.</p></div></header>
-        <section class="settings-grid"><article class="panel settings-card appearance-card"><div class="settings-icon"><Icon name="eye"/></div><div><h2>Размер и читаемость</h2><p>Настройки применяются сразу и сохраняются на этом компьютере.</p><div class="preset-setting"><span>Интерфейс</span><div class="preset-buttons"><button class:active={interfaceSize === "compact"} onclick={() => chooseInterfaceSize("compact")}>90%</button><button class:active={interfaceSize === "standard"} onclick={() => chooseInterfaceSize("standard")}>110%</button><button class:active={interfaceSize === "large"} onclick={() => chooseInterfaceSize("large")}>130%</button></div></div><div class="preset-setting"><span>Шрифт</span><div class="preset-buttons"><button class:active={fontSize === "normal"} onclick={() => chooseFontSize("normal")}>Обычный</button><button class:active={fontSize === "large"} onclick={() => chooseFontSize("large")}>Крупный</button><button class:active={fontSize === "xlarge"} onclick={() => chooseFontSize("xlarge")}>Очень крупный</button></div></div></div></article><article class="panel settings-card"><div class="settings-icon"><Icon name="sparkles"/></div><div><h2>Автоматическая выдача VIP</h2><p>VipperFox выдаёт VIP при официальном Watch Streak notification.</p><label class="number-setting"><span>Минимальная серия</span><div><input type="number" min="1" bind:value={settingsThreshold}/><b>стримов</b></div></label><button class="primary-button compact" onclick={saveSettings}>{settingsSaved ? "Сохранено ✓" : "Сохранить"}</button></div></article><article class="panel settings-card danger-zone"><div class="settings-icon"><Icon name="shield"/></div><div><h2>Подключённый канал</h2><p><strong>{snapshot.channelDisplayName}</strong> · @{snapshot.channelLogin}</p><button class="secondary-button danger" onclick={async () => snapshot = await disconnectTwitch()}>Отключить Twitch</button></div></article></section>
+        <section class="panel theme-card"><div><span class="section-kicker">ОФОРМЛЕНИЕ</span><h2>Выбери свой стиль</h2><p>Последняя выбранная тема сохраняется после перезапуска.</p></div><div class="theme-options"><button class:chosen={theme === "fox"} onclick={() => chooseTheme("fox")}><img src="/fox.png" alt=""/><span><strong>VipperFox</strong><small>Фиолетовый лис</small></span></button><button class:chosen={theme === "animecul"} onclick={() => chooseTheme("animecul")}><img src="/animecul.png" alt=""/><span><strong>Анимекул эдишин</strong><small>Лайм · кристалл · сияние</small></span></button></div></section><section class="settings-grid"><article class="panel settings-card appearance-card"><div class="settings-icon"><Icon name="eye"/></div><div><h2>Размер и читаемость</h2><p>Настройки применяются сразу и сохраняются на этом компьютере.</p><div class="preset-setting"><span>Интерфейс</span><div class="preset-buttons"><button class:active={interfaceSize === "compact"} onclick={() => chooseInterfaceSize("compact")}>90%</button><button class:active={interfaceSize === "standard"} onclick={() => chooseInterfaceSize("standard")}>110%</button><button class:active={interfaceSize === "large"} onclick={() => chooseInterfaceSize("large")}>130%</button></div></div><div class="preset-setting"><span>Шрифт</span><div class="preset-buttons"><button class:active={fontSize === "normal"} onclick={() => chooseFontSize("normal")}>Обычный</button><button class:active={fontSize === "large"} onclick={() => chooseFontSize("large")}>Крупный</button><button class:active={fontSize === "xlarge"} onclick={() => chooseFontSize("xlarge")}>Очень крупный</button></div></div></div></article><article class="panel settings-card"><div class="settings-icon"><Icon name="sparkles"/></div><div><h2>Автоматическая выдача VIP</h2><p>VipperFox выдаёт VIP при официальном Watch Streak notification.</p><label class="number-setting"><span>Минимальная серия</span><div><input type="number" min="1" bind:value={settingsThreshold}/><b>стримов</b></div></label><button class="primary-button compact" onclick={saveSettings}>{settingsSaved ? "Сохранено ✓" : "Сохранить"}</button></div></article><article class="panel settings-card danger-zone"><div class="settings-icon"><Icon name="shield"/></div><div><h2>Подключённый канал</h2><p><strong>{snapshot.channelDisplayName}</strong> · @{snapshot.channelLogin}</p><button class="secondary-button danger" onclick={async () => snapshot = await disconnectTwitch()}>Отключить Twitch</button></div></article></section>
       {/if}
 
       {#if snapshot.report.length}
